@@ -1,0 +1,18 @@
+{
+  "id": "b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3",
+  "pubkey": "3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d",
+  "created_at": 1700000000,
+  "kind": 30023,
+  "tags": [
+    ["d", "why-nostr-matters-2025"],
+    ["title", "Why Nostr Matters in 2025"],
+    ["summary", "An exploration of how Nostr is reshaping the social media landscape with censorship-resistant communication."],
+    ["image", "https://example.com/blog-header.jpg"],
+    ["published_at", "1700000000"],
+    ["t", "nostr"],
+    ["t", "decentralization"],
+    ["t", "freedom"]
+  ],
+  "content": "# Why Nostr Matters in 2025\n\nThe internet is at a crossroads. Centralized platforms have shown time and again that they cannot be trusted with our digital lives.\n\n## The Problem with Centralization\n\nWhen a single company controls the platform, they control the conversation. **Censorship**, algorithmic manipulation, and data harvesting are not bugs — they are features of the centralized model.\n\n## Enter Nostr\n\nNostr (Notes and Other Stuff Transmitted by Relays) offers a fundamentally different approach:\n\n- **Censorship resistance** — No single entity can silence you\n- **Portability** — Your identity and followers travel with you\n- **Interoperability** — Build on an open protocol, not a walled garden\n- **Simplicity** — The protocol is elegantly minimal\n\n## Looking Forward\n\nAs we move through 2025, the Nostr ecosystem continues to grow. New clients, new relay implementations, and new use cases emerge every week.\n\nThe future belongs to open protocols. Join us.\n\n---\n\n*Originally published on Nostr.*",
+  "sig": "c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4"
+}

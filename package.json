@@ -1,0 +1,11 @@
+{
+  "name": "social-crosspost",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Engagement-based cross-posting of Derek's Nostr content to X and LinkedIn",
+  "main": "check-and-post.mjs",
+  "scripts": {
+    "check": "node check-and-post.mjs",
+    "dry-run": "node check-and-post.mjs --dry-run"
+  }
+}

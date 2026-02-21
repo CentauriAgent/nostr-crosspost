@@ -1,0 +1,8 @@
+{
+  "name": "linkedin-poster",
+  "version": "1.0.0",
+  "type": "module",
+  "bin": {
+    "linkedin-post": "./bin/post.mjs"
+  }
+}

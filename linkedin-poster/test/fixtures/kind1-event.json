@@ -1,0 +1,13 @@
+{
+  "id": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+  "pubkey": "3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d",
+  "created_at": 1700000000,
+  "kind": 1,
+  "tags": [
+    ["p", "82341f882b6eabcd2ba7f1ef90aad961cf074af15b9ef44a09f9d2a8fbfbe6a2"],
+    ["t", "bitcoin"],
+    ["t", "nostr"]
+  ],
+  "content": "Just published a great article about the future of decentralized social media! #bitcoin #nostr\n\nnostr:npub1sg6plzptd64u62a878hep2kev3zqhgejsav0fsa5lkwc86wnaqese39cl6 check this out!\n\nhttps://example.com/photo.jpg\n\nThe future is bright for open protocols. 🚀",
+  "sig": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
+}

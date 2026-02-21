@@ -1,0 +1,9 @@
+{
+  "name": "x-poster",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Cross-post Nostr notes to X/Twitter",
+  "bin": {
+    "x-post": "./bin/post.mjs"
+  }
+}
