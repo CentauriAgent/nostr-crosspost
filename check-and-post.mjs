@@ -256,6 +256,14 @@ async function main() {
     // Skip reposts (kind 6)
     if (post.kind === 6) continue;
 
+    // Skip quoted posts (contain nostr:note1 or nostr:nevent1 references — context lost on X/LinkedIn)
+    const hasQuote = /nostr:(note1|nevent1)[a-z0-9]+/i.test(post.content || '');
+    if (hasQuote) {
+      state.skipped[eventId] = { reason: 'quoted post (context lost on other platforms)', at: now };
+      results.skipped.push({ id: eventId, reason: 'quoted post' });
+      continue;
+    }
+
     // Must be old enough
     const age = now - post.created_at;
     if (age < MIN_AGE_SECONDS) {
