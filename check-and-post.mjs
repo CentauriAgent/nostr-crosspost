@@ -108,6 +108,11 @@ const XWORTHY_PATTERNS = [
   /\bopen.?source\b/i, /\bfoss\b/i, /\bprotocol\b/i,
   /\bconference\b/i, /\bsummit\b/i, /\bhackathon\b/i, /\bevent\b/i,
   /\bshakespeare\b/i, /\bagora\b/i, /\bonyx\b/i, /\bopenclaw\b/i, /\bditto\b/i,
+  /\bcommunity\b/i, /\bcommunities\b/i, /\bmoderat/i, /\bweb.?of.?trust\b/i, /\bwot\b/i,
+  /\brelay\b/i, /\balgorithm\b/i, /\bdoomscroll/i, /\bbloomscroll/i,
+  /\bsocial.?media\b/i, /\bsocial.?network/i, /\bplatform\b/i,
+  /\bagent\b/i, /\bsovereign/i, /\bself.?custod/i, /\blightning\b/i, /\bzap/i,
+  /\btech\b/i, /\bsoftware\b/i, /\bopen\b/i, /\bbuild/i,
   /\bdev\b/i, /\bdeveloper/i, /\bbuilding\b/i, /\bshipped\b/i, /\blaunch/i,
   /\bzap/i, /\brelay\b/i, /\bnip-?\d/i, /\bweb.?of.?trust\b/i,
   /\bfreedom.?tech\b/i, /\bsovereign/i,
@@ -226,9 +231,18 @@ async function main() {
   for (const post of uniquePosts) {
     const eventId = post.id;
 
-    // Skip already processed
-    if (state.posted[eventId] || state.skipped[eventId]) {
+    // Skip already processed (but only if real posts, not dry-runs)
+    if (state.skipped[eventId]) {
       continue;
+    }
+    if (state.posted[eventId]) {
+      // Never repost deleted/rejected content
+      if (state.posted[eventId].deleted) continue;
+      const prev = state.posted[eventId].crossPosted || {};
+      const alreadyPostedX = prev.x && !prev.x.dryRun;
+      const alreadyPostedLinkedin = prev.linkedin && !prev.linkedin.dryRun;
+      if (alreadyPostedX && alreadyPostedLinkedin) continue;
+      // If only partially posted (or dry-run), fall through to check remaining platforms
     }
 
     // Skip replies (has "e" tag with "reply" marker)
@@ -279,7 +293,12 @@ async function main() {
     // Platform routing
     const posted = {};
 
-    if (classification.x && counts.x < DAILY_CAP_X) {
+    // Check what's already been posted (non-dry-run) for this event
+    const prevPosted = state.posted[eventId]?.crossPosted || {};
+    const alreadyOnX = prevPosted.x && !prevPosted.x.dryRun;
+    const alreadyOnLinkedin = prevPosted.linkedin && !prevPosted.linkedin.dryRun;
+
+    if (classification.x && counts.x < DAILY_CAP_X && !alreadyOnX) {
       const result = crossPost('x', nevent);
       if (result.success) {
         counts.x++;
@@ -287,7 +306,7 @@ async function main() {
       }
     }
 
-    if (classification.linkedin && counts.linkedin < DAILY_CAP_LINKEDIN) {
+    if (classification.linkedin && counts.linkedin < DAILY_CAP_LINKEDIN && !alreadyOnLinkedin) {
       const needsRewrite = classification.needsRewrite;
       if (needsRewrite) {
         posted.linkedin = { flagged: true, reason: 'needs professional rewrite', nevent, at: now };
@@ -301,12 +320,21 @@ async function main() {
     }
 
     if (Object.keys(posted).length > 0 || DRY_RUN) {
+      // Merge with existing record (preserve prior real posts)
+      const existingCrossPosted = state.posted[eventId]?.crossPosted || {};
+      const mergedCrossPosted = { ...existingCrossPosted };
+      for (const [platform, data] of Object.entries(posted)) {
+        // Only overwrite if new is real or old was dry-run
+        if (!mergedCrossPosted[platform] || mergedCrossPosted[platform].dryRun || !data.dryRun) {
+          mergedCrossPosted[platform] = data;
+        }
+      }
       state.posted[eventId] = {
         nevent,
         engagement,
         score: totalScore,
         trendingBonus,
-        crossPosted: posted,
+        crossPosted: mergedCrossPosted,
         content: post.content?.slice(0, 200),
         kind: post.kind,
       };
