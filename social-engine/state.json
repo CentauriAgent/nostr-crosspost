@@ -1,12 +1,19 @@
 {
-  "lastRun": null,
+  "lastRun": "2026-02-23T23:07:22.563Z",
   "repliesPosted": [],
-  "contentPosted": [],
+  "contentPosted": [
+    {
+      "id": "dry-1771888035991",
+      "content": "Setting up shop. Been building on the frontier for three years. Time to expand the conversation.",
+      "at": "2026-02-23T23:07:15.991Z",
+      "calendarRef": "week1-monday-post1"
+    }
+  ],
   "engagementReplies": [],
   "dailyCounts": {
-    "date": null,
-    "replies": 0,
-    "content": 0,
+    "date": "2026-02-23",
+    "replies": 5,
+    "content": 1,
     "engagement": 0
   }
 }

@@ -158,12 +158,15 @@ export async function runReplies(options = {}) {
     const tier = getTier(opp.author, topics);
     if (tier === 'LOW') { skipped++; continue; }
 
-    // Don't reply to same account twice in 24h
+    // Don't reply to same account twice in 24h (including this run)
     if (repliedAccounts24h.has(`@${opp.author}`)) {
       log(`Skipping @${opp.author} — already replied in 24h`, verbose);
       skipped++;
       continue;
     }
+
+    // Max 1 reply per account per run (spread engagement across accounts)
+    // This is enforced by adding to repliedAccounts24h after each post below
 
     // Rate limit: min 30 min between replies
     if (!canActNow(state.repliesPosted, MIN_MINUTES_BETWEEN)) {
@@ -184,6 +187,10 @@ export async function runReplies(options = {}) {
 
     log(`${tier} | @${opp.author} [${topics.join(',')}] → "${picked.text.slice(0, 80)}..."`, true);
 
+    // Mark template + account used immediately (before posting) to prevent dupes in this run
+    recentTemplates.add(picked.text);
+    repliedAccounts24h.add(`@${opp.author}`);
+
     if (!dryRun) {
       try {
         const result = await postTweet(picked.text, { replyTo: opp.id });
@@ -198,8 +205,6 @@ export async function runReplies(options = {}) {
         });
         state.dailyCounts.replies++;
         opp.actedOn = true;
-        recentTemplates.add(picked.text);
-        repliedAccounts24h.add(`@${opp.author}`);
         posted++;
         log(`✅ Posted reply ${result.id}`, true);
 
@@ -211,6 +216,9 @@ export async function runReplies(options = {}) {
           break;
         }
         log(`❌ Failed to post reply: ${e.message}`, true);
+        // Undo the marks since we didn't actually post
+        recentTemplates.delete(picked.text);
+        repliedAccounts24h.delete(`@${opp.author}`);
       }
     } else {
       log(`[DRY RUN] Would reply to @${opp.author} (${opp.id}): "${picked.text}"`, true);
