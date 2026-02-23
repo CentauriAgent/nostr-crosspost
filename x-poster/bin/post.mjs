@@ -114,7 +114,7 @@ async function main() {
   }
 
   if (verbose) console.log(`Event kind ${nostrEvent.kind} — formatting for X...`);
-  const { tweets, images } = format(nostrEvent, identifier, { noLink });
+  const { tweets, images } = format(nostrEvent, identifier, {});
 
   if (dryRun) {
     console.log('\n--- DRY RUN (would post to X) ---\n');

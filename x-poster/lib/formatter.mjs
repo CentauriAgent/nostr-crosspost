@@ -1,24 +1,40 @@
 /**
  * Format Nostr events for X/Twitter
  *
+ * Native X formatting — no Nostr fingerprints.
  * Handles:
  * - 280 char limit (auto-threading for longer content)
  * - Image extraction
  * - nostr: mention/reference stripping
- * - Nostr footer with njump link
+ * - Smart hashtag handling
  */
 
 const MAX_TWEET_CHARS = 280;
-const NOSTR_FOOTER = '\n\n🟣 Originally posted on Nostr';
 const IMAGE_RE = /https?:\/\/\S+\.(?:jpg|jpeg|png|gif|webp)(?:\?\S*)?/gi;
 const NOSTR_MENTION_RE = /nostr:npub1[a-z0-9]+/gi;
 const NOSTR_REF_RE = /nostr:(?:nevent1|naddr1|note1|nprofile1)[a-z0-9]+/gi;
+const NJUMP_RE = /https?:\/\/njump\.me\/\S+/gi;
+const NOSTR_ATTRIBUTION_RE = /(?:🟣\s*)?(?:originally )?posted (?:via|on) nostr\b[^\n]*/gi;
+const PURPLE_DOT_RE = /\n*🟣\s*/g;
 const URL_CHAR_COUNT = 23; // X counts all URLs as 23 chars (t.co wrapping)
 
+// Hashtags that work well on X for Derek's topics
+const X_HASHTAG_MAP = {
+  bitcoin: '#Bitcoin', btc: '#Bitcoin',
+  nostr: '#Nostr', lightning: '#Lightning',
+  ai: '#AI', privacy: '#Privacy',
+  opensource: '#OpenSource', foss: '#OpenSource',
+  decentralized: '#Decentralized', decentralization: '#Decentralized',
+  censorship: '#FreeSpeech', freedom: '#FreedomTech',
+  freedomtech: '#FreedomTech', protocol: '#Protocol',
+  zap: '#Zaps', zaps: '#Zaps',
+  devrel: '#DevRel', developer: '#Dev',
+};
+
 /**
- * Format a Nostr event for X/Twitter
+ * Format a Nostr event for X/Twitter — native feel, no Nostr traces
  * @param {object} event - Raw Nostr event
- * @param {string} originalIdentifier - nevent1.../naddr1... string
+ * @param {string} originalIdentifier - nevent1.../naddr1... string (unused now)
  * @param {object} options - { noLink: boolean }
  * @returns {{ tweets: string[], images: string[] }}
  */
@@ -28,21 +44,79 @@ export function format(event, originalIdentifier, options = {}) {
   }
 
   const kind = event.kind;
-  if (kind === 1) return formatKind1(event, originalIdentifier, options);
-  if (kind === 30023) return formatKind30023(event, originalIdentifier, options);
+  if (kind === 1) return formatKind1(event, options);
+  if (kind === 30023) return formatKind30023(event, options);
   throw new Error(`Only kind 1 and 30023 supported. Got kind ${kind}`);
 }
 
-function formatKind1(event, originalIdentifier, options) {
+/**
+ * Format raw text for X — strips all Nostr artifacts, returns native X content
+ * Can be called directly by the cross-post checker with pre-fetched content.
+ */
+export function formatTextForX(text, options = {}) {
+  // Extract images before stripping
+  const images = [...text.matchAll(IMAGE_RE)].map(m => m[0]);
+  for (const img of images) {
+    text = text.replace(img, '').trim();
+  }
+
+  text = stripNostrArtifacts(text);
+
+  // Smart hashtag handling
+  text = enhanceHashtags(text);
+
+  const tweets = threadText(text);
+  return { tweets, images };
+}
+
+function formatKind1(event, options) {
   let text = event.content || '';
 
   // Extract images before stripping
   const images = [...text.matchAll(IMAGE_RE)].map(m => m[0]);
-
-  // Remove image URLs from text
   for (const img of images) {
     text = text.replace(img, '').trim();
   }
+
+  text = stripNostrArtifacts(text);
+
+  // Smart hashtag handling
+  text = enhanceHashtags(text);
+
+  const tweets = threadText(text);
+  return { tweets, images };
+}
+
+function formatKind30023(event, options) {
+  const tags = event.tags || [];
+  const getTag = (name) => tags.find(t => t[0] === name)?.[1] || '';
+
+  const title = getTag('title');
+  const summary = getTag('summary') || stripMarkdown(event.content || '').slice(0, 200);
+  const image = getTag('image');
+
+  let text = title ? `${title}\n\n${summary}` : summary;
+  text = stripNostrArtifacts(text);
+  text = enhanceHashtags(text);
+
+  const tweets = threadText(text);
+  const images = image ? [image] : [];
+
+  return { tweets, images };
+}
+
+/**
+ * Remove ALL Nostr fingerprints from text
+ */
+function stripNostrArtifacts(text) {
+  // Remove njump.me links
+  text = text.replace(NJUMP_RE, '').trim();
+
+  // Remove "posted via Nostr" / "Originally posted on Nostr" attribution
+  text = text.replace(NOSTR_ATTRIBUTION_RE, '').trim();
+
+  // Remove purple dot indicator
+  text = text.replace(PURPLE_DOT_RE, '').trim();
 
   // Strip nostr: mentions and references
   text = text.replace(NOSTR_MENTION_RE, '').trim();
@@ -51,66 +125,49 @@ function formatKind1(event, originalIdentifier, options) {
   // Collapse excess whitespace
   text = text.replace(/\n{3,}/g, '\n\n').replace(/ {2,}/g, ' ').trim();
 
-  // Build footer — prefer full link, fall back to just emoji if it would force threading
-  if (options.noLink) {
-    const tweets = threadText(text, '', 0);
-    return { tweets, images };
-  }
-
-  const njumpLink = originalIdentifier ? `https://njump.me/${originalIdentifier}` : '';
-  const fullFooter = njumpLink ? `${NOSTR_FOOTER}\n${njumpLink}` : NOSTR_FOOTER;
-  const fullFooterEffLen = NOSTR_FOOTER.length + 1 + URL_CHAR_COUNT;
-
-  // If full footer fits in a single tweet, use it
-  if (text.length + fullFooterEffLen <= MAX_TWEET_CHARS) {
-    return { tweets: [text + fullFooter], images };
-  }
-
-  // If text alone fits in one tweet with just the emoji marker, do that instead of threading
-  const shortFooter = '\n\n🟣';
-  if (text.length + shortFooter.length <= MAX_TWEET_CHARS) {
-    return { tweets: [text + shortFooter], images };
-  }
-
-  // Otherwise thread with full footer on last tweet
-  const footer = fullFooter;
-  const footerEffectiveLen = fullFooterEffLen;
-  const tweets = threadText(text, footer, footerEffectiveLen);
-
-  return { tweets, images };
-}
-
-function formatKind30023(event, originalIdentifier, options) {
-  const tags = event.tags || [];
-  const getTag = (name) => tags.find(t => t[0] === name)?.[1] || '';
-
-  const title = getTag('title');
-  const summary = getTag('summary') || stripMarkdown(event.content || '').slice(0, 200);
-  const image = getTag('image');
-
-  const njumpLink = originalIdentifier ? `https://njump.me/${originalIdentifier}` : '';
-  const footer = options.noLink ? '' : (njumpLink ? `${NOSTR_FOOTER}\n${njumpLink}` : NOSTR_FOOTER);
-  const footerEffectiveLen = options.noLink ? 0 : (NOSTR_FOOTER.length + 1 + URL_CHAR_COUNT);
-
-  let text = title ? `${title}\n\n${summary}` : summary;
-  text = text.trim();
-
-  const tweets = threadText(text, footer, footerEffectiveLen);
-  const images = image ? [image] : [];
-
-  return { tweets, images };
+  return text;
 }
 
 /**
- * Split text into tweet-sized chunks with footer on the last tweet.
- * If the whole thing fits in one tweet, return as single tweet.
+ * Keep existing hashtags that work on X, optionally add relevant ones
  */
-function threadText(text, footer, footerEffectiveLen) {
-  const singleTweetMax = MAX_TWEET_CHARS - footerEffectiveLen;
+function enhanceHashtags(text) {
+  // Extract existing hashtags
+  const existingTags = new Set(
+    (text.match(/#\w+/g) || []).map(t => t.toLowerCase())
+  );
 
+  // Check if content mentions topics that could use hashtags
+  const lowerText = text.toLowerCase();
+  const suggestedTags = [];
+
+  for (const [keyword, hashtag] of Object.entries(X_HASHTAG_MAP)) {
+    const re = new RegExp(`\\b${keyword}\\b`, 'i');
+    if (re.test(lowerText) && !existingTags.has(hashtag.toLowerCase())) {
+      suggestedTags.push(hashtag);
+    }
+  }
+
+  // Only add up to 2 suggested hashtags to keep it natural
+  if (suggestedTags.length > 0 && existingTags.size < 3) {
+    const toAdd = suggestedTags.slice(0, Math.min(2, 3 - existingTags.size));
+    // Only add if they fit
+    const tagStr = '\n\n' + toAdd.join(' ');
+    if (text.length + tagStr.length <= MAX_TWEET_CHARS) {
+      text = text + tagStr;
+    }
+  }
+
+  return text;
+}
+
+/**
+ * Split text into tweet-sized chunks. No Nostr footer.
+ */
+function threadText(text) {
   // Fits in one tweet
-  if (text.length <= singleTweetMax) {
-    return [text + footer];
+  if (text.length <= MAX_TWEET_CHARS) {
+    return [text];
   }
 
   // Need to thread — split by sentences/paragraphs
@@ -119,7 +176,7 @@ function threadText(text, footer, footerEffectiveLen) {
   const threadIndicatorLen = 6; // " (X/Y)" approx
 
   while (remaining.length > 0) {
-    const isLast = remaining.length <= MAX_TWEET_CHARS - footerEffectiveLen - threadIndicatorLen;
+    const isLast = remaining.length <= MAX_TWEET_CHARS - threadIndicatorLen;
 
     if (isLast) {
       tweets.push(remaining);
@@ -132,18 +189,11 @@ function threadText(text, footer, footerEffectiveLen) {
     remaining = remaining.slice(splitAt).trim();
   }
 
-  // Add thread indicators and footer to last tweet
+  // Add thread indicators only if multi-tweet (no "1/" style, use (1/3) format)
   if (tweets.length > 1) {
     tweets.forEach((t, i) => {
-      const indicator = ` (${i + 1}/${tweets.length})`;
-      if (i === tweets.length - 1) {
-        tweets[i] = t + footer + indicator;
-      } else {
-        tweets[i] = t + indicator;
-      }
+      tweets[i] = t + ` (${i + 1}/${tweets.length})`;
     });
-  } else {
-    tweets[0] = tweets[0] + footer;
   }
 
   return tweets;

@@ -3,20 +3,22 @@
  * Social Cross-Post Checker
  *
  * Fetches Derek's recent Nostr posts, scores engagement, filters content,
- * and cross-posts qualifying posts to X and LinkedIn.
+ * and cross-posts qualifying posts to X and LinkedIn with platform-specific formatting.
+ * Also supports native drafts from social-strategy/drafts/ directory.
  *
  * Usage:
- *   node check-and-post.mjs [--dry-run] [--verbose]
+ *   node check-and-post.mjs [--dry-run] [--verbose] [--drafts-only]
  */
 
 import { execSync } from 'child_process';
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
-import { dirname, resolve } from 'path';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, renameSync } from 'fs';
+import { dirname, resolve, join } from 'path';
 import { fileURLToPath } from 'url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const TOOLS_DIR = resolve(__dirname, '..');
 const STATE_FILE = resolve(__dirname, '../../memory/crosspost-state.json');
+const DRAFTS_DIR = resolve(__dirname, '../../social-strategy/drafts');
 
 // --- Config ---
 const DEREK_PUBKEY = '3f770d65d3a764a9c5cb503ae123e62ec7598ad035d836e2a810f3877a745b24';
@@ -30,6 +32,7 @@ const DAILY_CAP_LINKEDIN = 1;
 
 const DRY_RUN = process.argv.includes('--dry-run');
 const VERBOSE = process.argv.includes('--verbose');
+const DRAFTS_ONLY = process.argv.includes('--drafts-only');
 
 // --- Helpers ---
 
@@ -57,12 +60,12 @@ function nakLines(args, timeout = 15000) {
 
 function loadState() {
   if (!existsSync(STATE_FILE)) {
-    return { lastCheck: 0, posted: {}, skipped: {}, dailyCounts: {} };
+    return { lastCheck: 0, posted: {}, skipped: {}, dailyCounts: {}, draftsPosted: [] };
   }
   try {
     return JSON.parse(readFileSync(STATE_FILE, 'utf-8'));
   } catch {
-    return { lastCheck: 0, posted: {}, skipped: {}, dailyCounts: {} };
+    return { lastCheck: 0, posted: {}, skipped: {}, dailyCounts: {}, draftsPosted: [] };
   }
 }
 
@@ -85,10 +88,256 @@ function getDailyCounts(state) {
 }
 
 function eventToNevent(id, relays) {
-  // Use nak encode to create nevent
   const relayArgs = relays.slice(0, 2).map(r => `--relay ${r}`).join(' ');
   const result = nak(`encode nevent ${id} --author ${DEREK_PUBKEY} ${relayArgs}`);
   return result || `nevent1${id}`;
+}
+
+// --- Platform-Specific Formatting ---
+
+/**
+ * Strip all Nostr artifacts from text
+ */
+function stripNostrArtifacts(text) {
+  return text
+    .replace(/https?:\/\/njump\.me\/\S+/gi, '')
+    .replace(/(?:🟣\s*)?(?:originally )?posted (?:via|on) nostr\b[^\n]*/gi, '')
+    .replace(/\n*🟣\s*/g, '')
+    .replace(/nostr:npub1[a-z0-9]+/gi, '')
+    .replace(/nostr:(?:nevent1|naddr1|note1|nprofile1)[a-z0-9]+/gi, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .replace(/ {2,}/g, ' ')
+    .trim();
+}
+
+/**
+ * Format content specifically for X — punchy, no links unless essential
+ */
+function formatForX(content) {
+  let text = stripNostrArtifacts(content);
+
+  // Remove image URLs (media will be attached separately)
+  text = text.replace(/https?:\/\/\S+\.(?:jpg|jpeg|png|gif|webp)(?:\?\S*)?/gi, '').trim();
+
+  // Keep it punchy — if over 280, trim at sentence boundary
+  if (text.length > 280) {
+    const cut = text.lastIndexOf('. ', 277);
+    if (cut > 140) {
+      text = text.slice(0, cut + 1);
+    } else {
+      const wordCut = text.lastIndexOf(' ', 277);
+      text = text.slice(0, wordCut > 0 ? wordCut : 277) + '…';
+    }
+  }
+
+  return text;
+}
+
+/**
+ * Format content for LinkedIn — professional expansion
+ */
+function formatForLinkedIn(content) {
+  let text = stripNostrArtifacts(content);
+
+  // Remove image URLs (will be attached)
+  text = text.replace(/https?:\/\/\S+\.(?:jpg|jpeg|png|gif|webp)(?:\?\S*)?/gi, '').trim();
+
+  // Add relevant LinkedIn hashtags
+  const lowerText = text.toLowerCase();
+  const tags = new Set();
+  const tagMap = {
+    bitcoin: '#Bitcoin', nostr: '#Nostr', ai: '#AI',
+    'open source': '#OpenSource', privacy: '#Privacy',
+    decentrali: '#Decentralization', freedom: '#FreedomTech',
+    lightning: '#Lightning', community: '#Community',
+    protocol: '#OpenProtocol',
+  };
+
+  for (const [keyword, tag] of Object.entries(tagMap)) {
+    if (lowerText.includes(keyword)) tags.add(tag);
+    if (tags.size >= 4) break;
+  }
+
+  if (tags.size > 0) {
+    text += '\n\n' + [...tags].join(' ');
+  }
+
+  return text;
+}
+
+// --- Native Drafts Support ---
+
+/**
+ * Load and process drafts from social-strategy/drafts/ directory.
+ * Draft format (JSON):
+ * {
+ *   "platforms": ["x", "linkedin"],  // or just ["x"]
+ *   "x": "Punchy X version of the post",
+ *   "linkedin": "Professional LinkedIn version",
+ *   "content": "Default content if platform-specific not provided",
+ *   "scheduledFor": "2026-02-24T10:00:00Z"  // optional
+ * }
+ * Or plain .txt files (posted to X only)
+ */
+function loadDrafts() {
+  if (!existsSync(DRAFTS_DIR)) return [];
+
+  const files = readdirSync(DRAFTS_DIR).filter(f => f.endsWith('.json') || f.endsWith('.txt'));
+  const drafts = [];
+
+  for (const file of files) {
+    const filePath = join(DRAFTS_DIR, file);
+    try {
+      const raw = readFileSync(filePath, 'utf-8');
+      if (file.endsWith('.json')) {
+        const draft = JSON.parse(raw);
+        draft._file = file;
+        draft._path = filePath;
+        drafts.push(draft);
+      } else {
+        // Plain text → X-only post
+        drafts.push({
+          platforms: ['x'],
+          x: raw.trim(),
+          content: raw.trim(),
+          _file: file,
+          _path: filePath,
+        });
+      }
+    } catch (e) {
+      if (VERBOSE) console.error(`Failed to read draft ${file}: ${e.message}`);
+    }
+  }
+
+  return drafts;
+}
+
+function processDrafts(state, counts) {
+  const drafts = loadDrafts();
+  const results = [];
+  const now = Date.now();
+
+  for (const draft of drafts) {
+    // Check scheduled time
+    if (draft.scheduledFor && new Date(draft.scheduledFor).getTime() > now) {
+      if (VERBOSE) console.error(`Draft ${draft._file} scheduled for later, skipping`);
+      continue;
+    }
+
+    const posted = {};
+
+    if (draft.platforms?.includes('x') && counts.x < DAILY_CAP_X) {
+      const xText = draft.x || draft.content;
+      if (xText) {
+        const result = postNativeContent('x', xText);
+        if (result.success) {
+          counts.x++;
+          posted.x = { at: Math.floor(now / 1000), dryRun: DRY_RUN, ...result };
+        }
+      }
+    }
+
+    if (draft.platforms?.includes('linkedin') && counts.linkedin < DAILY_CAP_LINKEDIN) {
+      const liText = draft.linkedin || draft.content;
+      if (liText) {
+        const result = postNativeContent('linkedin', liText);
+        if (result.success) {
+          counts.linkedin++;
+          posted.linkedin = { at: Math.floor(now / 1000), dryRun: DRY_RUN, ...result };
+        }
+      }
+    }
+
+    if (Object.keys(posted).length > 0) {
+      results.push({ file: draft._file, platforms: posted });
+
+      // Move draft to posted/ subdirectory (or delete if dry run)
+      if (!DRY_RUN) {
+        const postedDir = join(DRAFTS_DIR, 'posted');
+        if (!existsSync(postedDir)) mkdirSync(postedDir, { recursive: true });
+        try {
+          renameSync(draft._path, join(postedDir, draft._file));
+        } catch { /* ignore */ }
+      }
+
+      // Track in state
+      if (!state.draftsPosted) state.draftsPosted = [];
+      state.draftsPosted.push({
+        file: draft._file,
+        at: Math.floor(now / 1000),
+        platforms: Object.keys(posted),
+        dryRun: DRY_RUN,
+      });
+    }
+  }
+
+  return results;
+}
+
+/**
+ * Post native (non-Nostr) content directly to a platform
+ */
+function postNativeContent(platform, text) {
+  if (platform === 'x') {
+    // Use the X poster's API directly via a temp approach
+    const cmd = `cd ${TOOLS_DIR}/x-poster && echo ${JSON.stringify(JSON.stringify({ text }))} | node -e "
+      import { postTweet } from './lib/x.mjs';
+      const input = JSON.parse(require('fs').readFileSync(0, 'utf-8'));
+      const result = await postTweet(input.text);
+      console.log(JSON.stringify(result));
+    "`;
+
+    // Simpler: just write to temp file and use the formatter
+    if (DRY_RUN) {
+      console.error(`[DRY RUN] Would post to X: ${text.slice(0, 100)}...`);
+      return { success: true, dryRun: true };
+    }
+
+    try {
+      // Post directly using the X API
+      const script = `
+        import { postTweet } from '${TOOLS_DIR}/x-poster/lib/x.mjs';
+        const result = await postTweet(${JSON.stringify(text)});
+        console.log(JSON.stringify(result));
+      `;
+      const output = execSync(`node --input-type=module -e ${JSON.stringify(script)}`, {
+        encoding: 'utf-8', timeout: 30000
+      });
+      return { success: true, output: output.trim() };
+    } catch (e) {
+      return { success: false, error: e.message?.slice(0, 200) };
+    }
+  }
+
+  if (platform === 'linkedin') {
+    if (DRY_RUN) {
+      console.error(`[DRY RUN] Would post to LinkedIn: ${text.slice(0, 100)}...`);
+      return { success: true, dryRun: true };
+    }
+
+    try {
+      const script = `
+        import { publish } from '${TOOLS_DIR}/linkedin-poster/lib/linkedin.mjs';
+        const payload = {
+          commentary: ${JSON.stringify(text)},
+          visibility: 'PUBLIC',
+          distribution: { feedDistribution: 'MAIN_FEED', targetEntities: [], thirdPartyDistributionChannels: [] },
+          lifecycleState: 'PUBLISHED',
+          isReshareDisabledByAuthor: false,
+        };
+        const result = await publish(payload);
+        console.log(JSON.stringify(result));
+      `;
+      const output = execSync(`node --input-type=module -e ${JSON.stringify(script)}`, {
+        encoding: 'utf-8', timeout: 30000
+      });
+      return { success: true, output: output.trim() };
+    } catch (e) {
+      return { success: false, error: e.message?.slice(0, 200) };
+    }
+  }
+
+  return { success: false, error: `Unknown platform: ${platform}` };
 }
 
 // --- Content Classification ---
@@ -99,7 +348,7 @@ const SKIP_PATTERNS = [
   /\bfamily\b/i, /\bkids?\b/i, /\bwife\b/i, /\bkatie\b/i, /\blogan\b/i, /\bhalee\b/i,
   /^lol\b/i, /^ha+\b/i, /^nice\b/i, /^yes\b/i, /^no\b/i, /^this\b/i,
   /^😂/, /^🤣/, /^💀/,
-  /^nostr:n(pub|profile)1/,  // just tagging someone
+  /^nostr:n(pub|profile)1/,
 ];
 
 const XWORTHY_PATTERNS = [
@@ -133,12 +382,9 @@ const CASUAL_TONE_PATTERNS = [
 ];
 
 function classifyContent(content) {
-  // Check skip patterns
   for (const pat of SKIP_PATTERNS) {
     if (pat.test(content)) return { skip: true, reason: 'casual/personal content' };
   }
-
-  // Too short (< 30 chars) is likely casual
   if (content.length < 30) return { skip: true, reason: 'too short' };
 
   const isXWorthy = XWORTHY_PATTERNS.some(p => p.test(content));
@@ -161,25 +407,19 @@ function classifyContent(content) {
 
 function getEngagement(eventId) {
   const relayStr = RELAYS.join(' ');
-
   const reactions = nakLines(`req -k 7 --tag e="${eventId}" -l 200 ${relayStr}`, 20000).length;
   const reposts = nakLines(`req -k 6 --tag e="${eventId}" -l 200 ${relayStr}`, 20000).length;
   const zaps = nakLines(`req -k 9735 --tag e="${eventId}" -l 200 ${relayStr}`, 20000).length;
   const replies = nakLines(`req -k 1 --tag e="${eventId}" -l 200 ${relayStr}`, 20000).length;
-
   const score = (reactions * 1) + (reposts * 3) + (zaps * 5) + (replies * 2);
-
   return { reactions, reposts, zaps, replies, score };
 }
 
 function checkTrending(content) {
-  // Extract key terms and check NIP-50 hot search
   const words = content.replace(/nostr:\S+/g, '').replace(/https?:\S+/g, '')
     .split(/\s+/).filter(w => w.length > 4).slice(0, 3).join(' ');
   if (!words) return 0;
-
   const results = nakLines(`req -k 1 --search "sort:hot ${words}" -l 5 ${DITTO_RELAY}`, 10000);
-  // If Derek's post shows up in hot results, bonus points
   return results.length > 0 ? 5 : 0;
 }
 
@@ -209,16 +449,30 @@ async function main() {
   const since = now - LOOKBACK_SECONDS;
   const state = loadState();
   const counts = getDailyCounts(state);
-  const results = { timestamp: new Date().toISOString(), dryRun: DRY_RUN, actions: [], skipped: [] };
+  const results = { timestamp: new Date().toISOString(), dryRun: DRY_RUN, actions: [], skipped: [], drafts: [] };
 
-  // Fetch Derek's recent root posts (kind 1 + kind 30023)
+  // Process native drafts first
+  const draftResults = processDrafts(state, counts);
+  results.drafts = draftResults;
+
+  if (DRAFTS_ONLY) {
+    state.dailyCounts = counts;
+    saveState(state);
+    results.summary = {
+      draftsProcessed: draftResults.length,
+      dailyCounts: { x: counts.x, linkedin: counts.linkedin },
+    };
+    console.log(JSON.stringify(results, null, 2));
+    return;
+  }
+
+  // Fetch Derek's recent root posts
   const relayStr = RELAYS.join(' ');
   const posts = [
     ...nakLines(`req -k 1 -a ${DEREK_PUBKEY} --since ${since} -l 50 ${relayStr}`, 30000),
     ...nakLines(`req -k 30023 -a ${DEREK_PUBKEY} --since ${since} -l 10 ${relayStr}`, 30000),
   ];
 
-  // Deduplicate by id
   const seen = new Set();
   const uniquePosts = posts.filter(p => {
     if (seen.has(p.id)) return false;
@@ -231,21 +485,15 @@ async function main() {
   for (const post of uniquePosts) {
     const eventId = post.id;
 
-    // Skip already processed (but only if real posts, not dry-runs)
-    if (state.skipped[eventId]) {
-      continue;
-    }
+    if (state.skipped[eventId]) continue;
     if (state.posted[eventId]) {
-      // Never repost deleted/rejected content
       if (state.posted[eventId].deleted) continue;
       const prev = state.posted[eventId].crossPosted || {};
       const alreadyPostedX = prev.x && !prev.x.dryRun;
       const alreadyPostedLinkedin = prev.linkedin && !prev.linkedin.dryRun;
       if (alreadyPostedX && alreadyPostedLinkedin) continue;
-      // If only partially posted (or dry-run), fall through to check remaining platforms
     }
 
-    // Skip replies (has "e" tag with "reply" marker)
     const isReply = post.tags?.some(t => t[0] === 'e' && (t[3] === 'reply' || t[3] === 'root'));
     if (isReply) {
       state.skipped[eventId] = { reason: 'reply', at: now };
@@ -253,10 +501,8 @@ async function main() {
       continue;
     }
 
-    // Skip reposts (kind 6)
     if (post.kind === 6) continue;
 
-    // Skip quoted posts (contain nostr:note1 or nostr:nevent1 references — context lost on X/LinkedIn)
     const hasQuote = /nostr:(note1|nevent1)[a-z0-9]+/i.test(post.content || '');
     if (hasQuote) {
       state.skipped[eventId] = { reason: 'quoted post (context lost on other platforms)', at: now };
@@ -264,14 +510,12 @@ async function main() {
       continue;
     }
 
-    // Must be old enough
     const age = now - post.created_at;
     if (age < MIN_AGE_SECONDS) {
       if (VERBOSE) console.error(`Skipping ${eventId.slice(0,8)}... too young (${Math.round(age/60)}m)`);
-      continue; // Don't mark as skipped — check again next run
+      continue;
     }
 
-    // Content classification
     const classification = classifyContent(post.content || '');
     if (classification.skip) {
       state.skipped[eventId] = { reason: classification.reason, at: now };
@@ -279,7 +523,6 @@ async function main() {
       continue;
     }
 
-    // Engagement scoring
     const engagement = getEngagement(eventId);
     const trendingBonus = checkTrending(post.content || '');
     const totalScore = engagement.score + trendingBonus;
@@ -295,16 +538,18 @@ async function main() {
       continue;
     }
 
-    // Generate nevent
     const nevent = eventToNevent(eventId, RELAYS);
-
-    // Platform routing
     const posted = {};
 
-    // Check what's already been posted (non-dry-run) for this event
     const prevPosted = state.posted[eventId]?.crossPosted || {};
     const alreadyOnX = prevPosted.x && !prevPosted.x.dryRun;
     const alreadyOnLinkedin = prevPosted.linkedin && !prevPosted.linkedin.dryRun;
+
+    // Store platform-specific formatted versions
+    const platformVersions = {
+      x: formatForX(post.content || ''),
+      linkedin: formatForLinkedIn(post.content || ''),
+    };
 
     if (classification.x && counts.x < DAILY_CAP_X && !alreadyOnX) {
       const result = crossPost('x', nevent);
@@ -315,8 +560,7 @@ async function main() {
     }
 
     if (classification.linkedin && counts.linkedin < DAILY_CAP_LINKEDIN && !alreadyOnLinkedin) {
-      const needsRewrite = classification.needsRewrite;
-      if (needsRewrite) {
+      if (classification.needsRewrite) {
         posted.linkedin = { flagged: true, reason: 'needs professional rewrite', nevent, at: now };
       } else {
         const result = crossPost('linkedin', nevent);
@@ -328,11 +572,9 @@ async function main() {
     }
 
     if (Object.keys(posted).length > 0 || DRY_RUN) {
-      // Merge with existing record (preserve prior real posts)
       const existingCrossPosted = state.posted[eventId]?.crossPosted || {};
       const mergedCrossPosted = { ...existingCrossPosted };
       for (const [platform, data] of Object.entries(posted)) {
-        // Only overwrite if new is real or old was dry-run
         if (!mergedCrossPosted[platform] || mergedCrossPosted[platform].dryRun || !data.dryRun) {
           mergedCrossPosted[platform] = data;
         }
@@ -344,6 +586,7 @@ async function main() {
         trendingBonus,
         crossPosted: mergedCrossPosted,
         content: post.content?.slice(0, 200),
+        platformVersions,
         kind: post.kind,
       };
       results.actions.push({
@@ -352,6 +595,7 @@ async function main() {
         score: totalScore,
         engagement,
         platforms: posted,
+        platformVersions,
         content: post.content?.slice(0, 120),
         needsRewrite: classification.needsRewrite || false,
       });
@@ -362,11 +606,11 @@ async function main() {
   state.dailyCounts = counts;
   saveState(state);
 
-  // Summary
   results.summary = {
     postsChecked: uniquePosts.length,
     actioned: results.actions.length,
     skipped: results.skipped.length,
+    draftsProcessed: draftResults.length,
     dailyCounts: { x: counts.x, linkedin: counts.linkedin },
     capsRemaining: { x: DAILY_CAP_X - counts.x, linkedin: DAILY_CAP_LINKEDIN - counts.linkedin },
   };
