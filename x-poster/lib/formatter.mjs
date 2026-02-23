@@ -164,9 +164,20 @@ function enhanceHashtags(text) {
 /**
  * Split text into tweet-sized chunks. No Nostr footer.
  */
+function twitterLength(text) {
+  // X counts all URLs (including bare domains like example.com) as 23 chars via t.co
+  const urlRegex = /https?:\/\/\S+|(?:[\w-]+\.)+(?:com|org|net|io|app|me|dev|xyz|co|sh)\b\S*/gi;
+  let adjusted = text;
+  const urls = text.match(urlRegex) || [];
+  for (const url of urls) {
+    adjusted = adjusted.replace(url, 'x'.repeat(URL_CHAR_COUNT));
+  }
+  return adjusted.length;
+}
+
 function threadText(text) {
-  // Fits in one tweet
-  if (text.length <= MAX_TWEET_CHARS) {
+  // Fits in one tweet (using X's URL-adjusted length)
+  if (twitterLength(text) <= MAX_TWEET_CHARS) {
     return [text];
   }
 
@@ -176,7 +187,7 @@ function threadText(text) {
   const threadIndicatorLen = 6; // " (X/Y)" approx
 
   while (remaining.length > 0) {
-    const isLast = remaining.length <= MAX_TWEET_CHARS - threadIndicatorLen;
+    const isLast = twitterLength(remaining) <= MAX_TWEET_CHARS - threadIndicatorLen;
 
     if (isLast) {
       tweets.push(remaining);
