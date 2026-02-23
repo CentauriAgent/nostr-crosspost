@@ -16,9 +16,10 @@ import { oauthHeader } from '../x-poster/lib/oauth.mjs';
 import { readCredentials } from '../x-poster/lib/token.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const TARGETS_FILE = resolve(__dirname, '../../social-strategy/REPLY-TARGETS.md');
-const OPPORTUNITIES_FILE = resolve(__dirname, '../../social-strategy/reply-opportunities.json');
-const STATE_FILE = resolve(__dirname, '../../social-strategy/scanner-state.json');
+const HOME = process.env.HOME || '/home/moltbot';
+const TARGETS_FILE = resolve(HOME, 'clawd/social-strategy/REPLY-TARGETS.md');
+const OPPORTUNITIES_FILE = resolve(HOME, 'clawd/social-strategy/reply-opportunities.json');
+const STATE_FILE = resolve(HOME, 'clawd/social-strategy/scanner-state.json');
 
 const VERBOSE = process.argv.includes('--verbose');
 const DRY_RUN = process.argv.includes('--dry-run');

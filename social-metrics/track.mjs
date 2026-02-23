@@ -16,7 +16,8 @@ import { oauthHeader } from '../x-poster/lib/oauth.mjs';
 import { readCredentials } from '../x-poster/lib/token.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const METRICS_DIR = resolve(__dirname, '../../social-strategy/metrics');
+const HOME = process.env.HOME || '/home/moltbot';
+const METRICS_DIR = resolve(HOME, 'clawd/social-strategy/metrics');
 const LATEST_FILE = join(METRICS_DIR, 'latest.json');
 
 const VERBOSE = process.argv.includes('--verbose');
