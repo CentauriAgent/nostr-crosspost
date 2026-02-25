@@ -22,17 +22,46 @@ const DRAFTS_DIR = resolve(__dirname, '../../social-strategy/drafts');
 
 // --- Config ---
 const DEREK_PUBKEY = '3f770d65d3a764a9c5cb503ae123e62ec7598ad035d836e2a810f3877a745b24';
+// Centauri's pubkey — filter out posts that were already cross-posted by the agent
+const CENTAURI_PUBKEY = '90d8d48925ea3fbb2e3310775268d1581f4d01d7a3348ca8ca415d632bd2a1d1';
 const RELAYS = ['wss://relay.ditto.pub', 'wss://relay.primal.net', 'wss://nos.lol'];
 const DITTO_RELAY = 'wss://relay.ditto.pub';
-const MIN_AGE_SECONDS = 3600; // 1 hour
+const MIN_AGE_SECONDS = 3600; // 1 hour — post must be at least this old
 const LOOKBACK_SECONDS = 86400; // 24 hours
-const ENGAGEMENT_THRESHOLD = 10;
+const MIN_CONTENT_LENGTH = 50; // skip very short posts
+
+// Platform-specific engagement thresholds (higher = more selective)
+const THRESHOLD_X = 40;
+const THRESHOLD_LINKEDIN = 60;
+
 const DAILY_CAP_X = 3;
 const DAILY_CAP_LINKEDIN = 1;
 
 const DRY_RUN = process.argv.includes('--dry-run');
 const VERBOSE = process.argv.includes('--verbose');
 const DRAFTS_ONLY = process.argv.includes('--drafts-only');
+
+// --- Content Blocklist ---
+// Posts matching these patterns should NEVER be cross-posted
+const BLOCKLIST_PATTERNS = [
+  // Personal finance / trading
+  /\bbuy order\b/i, /\bsell order\b/i, /\bsetting.*(buy|sell)\b/i,
+  /\bposition\b.*\b(long|short)\b/i, /\btrad(e|ing)\b.*\border\b/i,
+  /\bdca\b/i,
+  // Bot/agent commands and internal stuff
+  /\bstop openclaw\b/i, /\bheartbeat\b/i, /\bheartbeat_ok\b/i,
+  // Pure memes with no substance
+  /^[A-Z\s!?.]{1,30}$/,  // ALL CAPS short posts
+  // Personal/family (reinforced)
+  /\bfamily\b/i, /\bkids?\b/i, /\bwife\b/i, /\bkatie\b/i, /\blogan\b/i, /\bhalee\b/i,
+  /\btherapy\b/i, /\bdoctor\b/i, /\bappointment\b/i,
+  // Conversations / replies to specific people
+  /^@\w+/,
+  // Just an image URL with no real text
+  /^\s*https?:\/\/\S+\.(jpg|jpeg|png|gif|webp)\S*\s*$/i,
+  // Shitposting indicators
+  /\bshitpost/i, /\bcopium\b/i, /\blet'?s\s+go\s*!*$/i,
+];
 
 // --- Helpers ---
 
@@ -95,9 +124,6 @@ function eventToNevent(id, relays) {
 
 // --- Platform-Specific Formatting ---
 
-/**
- * Strip all Nostr artifacts from text
- */
 function stripNostrArtifacts(text) {
   return text
     .replace(/https?:\/\/njump\.me\/\S+/gi, '')
@@ -110,16 +136,10 @@ function stripNostrArtifacts(text) {
     .trim();
 }
 
-/**
- * Format content specifically for X — punchy, no links unless essential
- */
 function formatForX(content) {
   let text = stripNostrArtifacts(content);
-
-  // Remove image URLs (media will be attached separately)
   text = text.replace(/https?:\/\/\S+\.(?:jpg|jpeg|png|gif|webp)(?:\?\S*)?/gi, '').trim();
 
-  // Keep it punchy — if over 280, trim at sentence boundary
   if (text.length > 280) {
     const cut = text.lastIndexOf('. ', 277);
     if (cut > 140) {
@@ -133,16 +153,10 @@ function formatForX(content) {
   return text;
 }
 
-/**
- * Format content for LinkedIn — professional expansion
- */
 function formatForLinkedIn(content) {
   let text = stripNostrArtifacts(content);
-
-  // Remove image URLs (will be attached)
   text = text.replace(/https?:\/\/\S+\.(?:jpg|jpeg|png|gif|webp)(?:\?\S*)?/gi, '').trim();
 
-  // Add relevant LinkedIn hashtags
   const lowerText = text.toLowerCase();
   const tags = new Set();
   const tagMap = {
@@ -167,18 +181,6 @@ function formatForLinkedIn(content) {
 
 // --- Native Drafts Support ---
 
-/**
- * Load and process drafts from social-strategy/drafts/ directory.
- * Draft format (JSON):
- * {
- *   "platforms": ["x", "linkedin"],  // or just ["x"]
- *   "x": "Punchy X version of the post",
- *   "linkedin": "Professional LinkedIn version",
- *   "content": "Default content if platform-specific not provided",
- *   "scheduledFor": "2026-02-24T10:00:00Z"  // optional
- * }
- * Or plain .txt files (posted to X only)
- */
 function loadDrafts() {
   if (!existsSync(DRAFTS_DIR)) return [];
 
@@ -195,7 +197,6 @@ function loadDrafts() {
         draft._path = filePath;
         drafts.push(draft);
       } else {
-        // Plain text → X-only post
         drafts.push({
           platforms: ['x'],
           x: raw.trim(),
@@ -218,7 +219,6 @@ function processDrafts(state, counts) {
   const now = Date.now();
 
   for (const draft of drafts) {
-    // Check scheduled time
     if (draft.scheduledFor && new Date(draft.scheduledFor).getTime() > now) {
       if (VERBOSE) console.error(`Draft ${draft._file} scheduled for later, skipping`);
       continue;
@@ -231,7 +231,7 @@ function processDrafts(state, counts) {
       if (xText) {
         const result = postNativeContent('x', xText);
         if (result.success) {
-          counts.x++;
+          if (!DRY_RUN) counts.x++;
           posted.x = { at: Math.floor(now / 1000), dryRun: DRY_RUN, ...result };
         }
       }
@@ -242,7 +242,7 @@ function processDrafts(state, counts) {
       if (liText) {
         const result = postNativeContent('linkedin', liText);
         if (result.success) {
-          counts.linkedin++;
+          if (!DRY_RUN) counts.linkedin++;
           posted.linkedin = { at: Math.floor(now / 1000), dryRun: DRY_RUN, ...result };
         }
       }
@@ -251,7 +251,6 @@ function processDrafts(state, counts) {
     if (Object.keys(posted).length > 0) {
       results.push({ file: draft._file, platforms: posted });
 
-      // Move draft to posted/ subdirectory (or delete if dry run)
       if (!DRY_RUN) {
         const postedDir = join(DRAFTS_DIR, 'posted');
         if (!existsSync(postedDir)) mkdirSync(postedDir, { recursive: true });
@@ -260,7 +259,6 @@ function processDrafts(state, counts) {
         } catch { /* ignore */ }
       }
 
-      // Track in state
       if (!state.draftsPosted) state.draftsPosted = [];
       state.draftsPosted.push({
         file: draft._file,
@@ -274,27 +272,14 @@ function processDrafts(state, counts) {
   return results;
 }
 
-/**
- * Post native (non-Nostr) content directly to a platform
- */
 function postNativeContent(platform, text) {
   if (platform === 'x') {
-    // Use the X poster's API directly via a temp approach
-    const cmd = `cd ${TOOLS_DIR}/x-poster && echo ${JSON.stringify(JSON.stringify({ text }))} | node -e "
-      import { postTweet } from './lib/x.mjs';
-      const input = JSON.parse(require('fs').readFileSync(0, 'utf-8'));
-      const result = await postTweet(input.text);
-      console.log(JSON.stringify(result));
-    "`;
-
-    // Simpler: just write to temp file and use the formatter
     if (DRY_RUN) {
       console.error(`[DRY RUN] Would post to X: ${text.slice(0, 100)}...`);
       return { success: true, dryRun: true };
     }
 
     try {
-      // Post directly using the X API
       const script = `
         import { postTweet } from '${TOOLS_DIR}/x-poster/lib/x.mjs';
         const result = await postTweet(${JSON.stringify(text)});
@@ -345,7 +330,6 @@ function postNativeContent(platform, text) {
 const SKIP_PATTERNS = [
   /^gm\b/i, /good morning/i, /good night/i, /gn\b/i,
   /pura vida/i,
-  /\bfamily\b/i, /\bkids?\b/i, /\bwife\b/i, /\bkatie\b/i, /\blogan\b/i, /\bhalee\b/i,
   /^lol\b/i, /^ha+\b/i, /^nice\b/i, /^yes\b/i, /^no\b/i, /^this\b/i,
   /^😂/, /^🤣/, /^💀/,
   /^nostr:n(pub|profile)1/,
@@ -363,8 +347,7 @@ const XWORTHY_PATTERNS = [
   /\bagent\b/i, /\bsovereign/i, /\bself.?custod/i, /\blightning\b/i, /\bzap/i,
   /\btech\b/i, /\bsoftware\b/i, /\bopen\b/i, /\bbuild/i,
   /\bdev\b/i, /\bdeveloper/i, /\bbuilding\b/i, /\bshipped\b/i, /\blaunch/i,
-  /\bzap/i, /\brelay\b/i, /\bnip-?\d/i, /\bweb.?of.?trust\b/i,
-  /\bfreedom.?tech\b/i, /\bsovereign/i,
+  /\bnip-?\d/i, /\bfreedom.?tech\b/i,
 ];
 
 const LINKEDIN_PATTERNS = [
@@ -377,15 +360,48 @@ const LINKEDIN_PATTERNS = [
 ];
 
 const CASUAL_TONE_PATTERNS = [
-  /\bshitpost/i, /\blmao\b/i, /\blol\b/i, /\bbruh\b/i, /\bfam\b/i,
-  /😂|🤣|💀|🫡|🔥/, /\baf\b/i, /\bdegen\b/i, /\blfg\b/i, /\bhaha/i,
+  /\blmao\b/i, /\bbruh\b/i, /\bfam\b/i,
+  /😂|🤣|💀/, /\baf\b/i, /\bdegen\b/i, /\blfg\b/i, /\bhaha/i,
 ];
 
+/**
+ * Check if content matches any blocklist pattern — these NEVER get cross-posted
+ */
+function isBlocklisted(content) {
+  for (const pat of BLOCKLIST_PATTERNS) {
+    if (pat.test(content)) return true;
+  }
+  return false;
+}
+
+/**
+ * Check if a post was already cross-posted by the agent (e.g. I posted it last night)
+ * Looks for similar content in the posted state
+ */
+function isDuplicateContent(content, state) {
+  const normalized = content.toLowerCase().replace(/\s+/g, ' ').trim().slice(0, 100);
+  for (const [, entry] of Object.entries(state.posted || {})) {
+    if (!entry.content) continue;
+    const prevNormalized = entry.content.toLowerCase().replace(/\s+/g, ' ').trim().slice(0, 100);
+    // Check for high similarity (>80% overlap)
+    if (normalized === prevNormalized) return true;
+    // Check if one contains the other
+    if (normalized.includes(prevNormalized) || prevNormalized.includes(normalized)) return true;
+  }
+  return false;
+}
+
 function classifyContent(content) {
+  // Blocklist check first — absolute no-go
+  if (isBlocklisted(content)) return { skip: true, reason: 'blocklisted content' };
+
   for (const pat of SKIP_PATTERNS) {
     if (pat.test(content)) return { skip: true, reason: 'casual/personal content' };
   }
-  if (content.length < 30) return { skip: true, reason: 'too short' };
+
+  // Strip nostr artifacts before checking length
+  const cleanContent = stripNostrArtifacts(content);
+  if (cleanContent.length < MIN_CONTENT_LENGTH) return { skip: true, reason: `too short (${cleanContent.length} chars, need ${MIN_CONTENT_LENGTH})` };
 
   const isXWorthy = XWORTHY_PATTERNS.some(p => p.test(content));
   const isLinkedInWorthy = LINKEDIN_PATTERNS.some(p => p.test(content));
@@ -398,7 +414,7 @@ function classifyContent(content) {
   return {
     skip: false,
     x: isXWorthy,
-    linkedin: isLinkedInWorthy || (isXWorthy && content.length > 200),
+    linkedin: isLinkedInWorthy || (isXWorthy && cleanContent.length > 200),
     needsRewrite: isCasualTone && isLinkedInWorthy,
   };
 }
@@ -449,6 +465,15 @@ async function main() {
   const since = now - LOOKBACK_SECONDS;
   const state = loadState();
   const counts = getDailyCounts(state);
+
+  // IMPORTANT: Only count real (non-dry-run) posts toward daily caps
+  // Reset counts if they include dry-run tallies from previous runs
+  if (counts._includesDryRun) {
+    counts.x = 0;
+    counts.linkedin = 0;
+    delete counts._includesDryRun;
+  }
+
   const results = { timestamp: new Date().toISOString(), dryRun: DRY_RUN, actions: [], skipped: [], drafts: [] };
 
   // Process native drafts first
@@ -494,6 +519,7 @@ async function main() {
       if (alreadyPostedX && alreadyPostedLinkedin) continue;
     }
 
+    // Skip replies
     const isReply = post.tags?.some(t => t[0] === 'e' && (t[3] === 'reply' || t[3] === 'root'));
     if (isReply) {
       state.skipped[eventId] = { reason: 'reply', at: now };
@@ -501,8 +527,10 @@ async function main() {
       continue;
     }
 
+    // Skip reposts
     if (post.kind === 6) continue;
 
+    // Skip quoted posts (lose context on other platforms)
     const hasQuote = /nostr:(note1|nevent1)[a-z0-9]+/i.test(post.content || '');
     if (hasQuote) {
       state.skipped[eventId] = { reason: 'quoted post (context lost on other platforms)', at: now };
@@ -510,19 +538,31 @@ async function main() {
       continue;
     }
 
+    // Skip too-young posts
     const age = now - post.created_at;
     if (age < MIN_AGE_SECONDS) {
       if (VERBOSE) console.error(`Skipping ${eventId.slice(0,8)}... too young (${Math.round(age/60)}m)`);
       continue;
     }
 
+    // Skip duplicate content (already cross-posted previously)
+    if (isDuplicateContent(post.content || '', state)) {
+      state.skipped[eventId] = { reason: 'duplicate of previously posted content', at: now };
+      results.skipped.push({ id: eventId, reason: 'duplicate content' });
+      if (VERBOSE) console.error(`Skipping ${eventId.slice(0,8)}... duplicate content`);
+      continue;
+    }
+
+    // Classify content
     const classification = classifyContent(post.content || '');
     if (classification.skip) {
       state.skipped[eventId] = { reason: classification.reason, at: now };
       results.skipped.push({ id: eventId, reason: classification.reason, content: post.content?.slice(0, 80) });
+      if (VERBOSE) console.error(`Skipping ${eventId.slice(0,8)}... ${classification.reason}`);
       continue;
     }
 
+    // Score engagement
     const engagement = getEngagement(eventId);
     const trendingBonus = checkTrending(post.content || '');
     const totalScore = engagement.score + trendingBonus;
@@ -532,9 +572,14 @@ async function main() {
       console.error(`  Content: ${post.content?.slice(0, 100)}`);
     }
 
-    if (totalScore < ENGAGEMENT_THRESHOLD) {
-      state.skipped[eventId] = { reason: `low engagement (score=${totalScore})`, at: now };
+    // Platform-specific threshold checks
+    const meetsXThreshold = totalScore >= THRESHOLD_X;
+    const meetsLinkedInThreshold = totalScore >= THRESHOLD_LINKEDIN;
+
+    if (!meetsXThreshold && !meetsLinkedInThreshold) {
+      state.skipped[eventId] = { reason: `below threshold (score=${totalScore}, needX=${THRESHOLD_X}, needLI=${THRESHOLD_LINKEDIN})`, at: now };
       results.skipped.push({ id: eventId, reason: `low engagement (${totalScore})`, content: post.content?.slice(0, 80) });
+      if (VERBOSE) console.error(`  → Below threshold (X needs ${THRESHOLD_X}, LinkedIn needs ${THRESHOLD_LINKEDIN})`);
       continue;
     }
 
@@ -545,33 +590,32 @@ async function main() {
     const alreadyOnX = prevPosted.x && !prevPosted.x.dryRun;
     const alreadyOnLinkedin = prevPosted.linkedin && !prevPosted.linkedin.dryRun;
 
-    // Store platform-specific formatted versions
     const platformVersions = {
       x: formatForX(post.content || ''),
       linkedin: formatForLinkedIn(post.content || ''),
     };
 
-    if (classification.x && counts.x < DAILY_CAP_X && !alreadyOnX) {
+    if (classification.x && meetsXThreshold && counts.x < DAILY_CAP_X && !alreadyOnX) {
       const result = crossPost('x', nevent);
       if (result.success) {
-        counts.x++;
+        if (!DRY_RUN) counts.x++;
         posted.x = { at: now, dryRun: DRY_RUN, ...result };
       }
     }
 
-    if (classification.linkedin && counts.linkedin < DAILY_CAP_LINKEDIN && !alreadyOnLinkedin) {
+    if (classification.linkedin && meetsLinkedInThreshold && counts.linkedin < DAILY_CAP_LINKEDIN && !alreadyOnLinkedin) {
       if (classification.needsRewrite) {
         posted.linkedin = { flagged: true, reason: 'needs professional rewrite', nevent, at: now };
       } else {
         const result = crossPost('linkedin', nevent);
         if (result.success) {
-          counts.linkedin++;
+          if (!DRY_RUN) counts.linkedin++;
           posted.linkedin = { at: now, dryRun: DRY_RUN, ...result };
         }
       }
     }
 
-    if (Object.keys(posted).length > 0 || DRY_RUN) {
+    if (Object.keys(posted).length > 0) {
       const existingCrossPosted = state.posted[eventId]?.crossPosted || {};
       const mergedCrossPosted = { ...existingCrossPosted };
       for (const [platform, data] of Object.entries(posted)) {
@@ -613,6 +657,7 @@ async function main() {
     draftsProcessed: draftResults.length,
     dailyCounts: { x: counts.x, linkedin: counts.linkedin },
     capsRemaining: { x: DAILY_CAP_X - counts.x, linkedin: DAILY_CAP_LINKEDIN - counts.linkedin },
+    thresholds: { x: THRESHOLD_X, linkedin: THRESHOLD_LINKEDIN },
   };
 
   console.log(JSON.stringify(results, null, 2));
